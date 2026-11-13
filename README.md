@@ -2,7 +2,7 @@
 
 claude-harness is the configuration folder behind my Claude Code sessions. It holds the rules every session loads, a runner that builds tickets while I am away, a router that picks the model for each job, and hooks that block what must never happen.
 
-Status: in daily use, private, still changing. The figures below are the ones recorded in the repo's own docs as of 2026-11-11.
+Status: in daily use, private, still changing. The figures below are the ones recorded in the repo's own docs and run records as of 2026-11-12.
 
 This repository holds no code. It describes how the harness is put together and why, with the numbers that forced each choice and the places where it is still weak.
 
@@ -20,33 +20,78 @@ I work alone and run coding agents all day, on several projects at once. Before 
 
 Each rule in the harness exists because one of these kept happening. The mechanism beside each rule is what stopped it.
 
-The short picture is a small software shop that lives in a folder. A planner interviews me before anything gets built. Builders each take one ticket to their own desk. Inspectors read finished work and never fix it. A foreman checks every piece before it goes on the shared shelf. A dispatcher decides who gets each job. And there are locks on the doors.
+The short picture is a small software shop that lives in a folder.
+
+- **A planner** (Fable) interviews me before anything gets built, one round of questions at a time, and writes the answers down as a spec and a set of tickets.
+- **Builders** (Opus, mostly) each take one ticket to their own desk, a git worktree, so nobody steps on anybody else.
+- **Inspectors** (review legs from Claude, GPT and Kimi) read finished work and report problems. They never fix anything.
+- **A foreman** (the runner) hands out tickets and checks every piece itself before it goes on the shared shelf.
+- **A dispatcher** (the router) decides who gets each job.
+- **Locks on the doors** (hooks) block what must never happen, whatever a model remembers or forgets.
+- **A librarian** (the brain) hands every session a card of what the project has decided, and answers questions with quotes from its docs.
+
+Nothing reaches `main` without me.
 
 ## How work flows
 
 ```mermaid
 flowchart TD
-  req(["A request"]) --> triage{"Triage: pick a lane"}
-  triage -->|"Inline or loop"| same["Done in the same session"]
-  triage -->|"Pipeline"| grill["The planner interviews me<br/>the answers become a spec"]
-  grill --> tickets["Tickets drafted and reviewed<br/>I approve the breakdown"]
-  tickets --> runner["Runner takes the ready tickets<br/>two at a time"]
-  runner --> session["Router picks the model<br/>a session builds in its own worktree"]
-  session --> gate{"The runner's gate<br/>every Verify line"}
-  gate -->|"red: fix pass, two at most"| session
-  gate -->|"third red"| parked["Parked for me<br/>other tickets keep going"]
-  gate -->|"green"| land["Fast-forward onto<br/>the integration branch"]
-  land -->|"tickets left"| runner
-  land -->|"all landed"| wave["PR into the staging branch<br/>a review wave posts one comment"]
-  wave --> me["My review, fixes and a manual pass<br/>my GREEN merges the PR"]
+  req(["A request, or a brief issue"]) --> triage{"Triage<br/>name the lane and the model"}
+  triage -->|"Inline: small and clear"| inline["Done in the same session"]
+  triage -->|"Loop: keep going until X"| loopl["Agree the goal and the stop condition<br/>then iterate"]
+  triage -->|"Split: too big"| split["Propose the split<br/>each part takes a lane"]
+  triage -->|"Pipeline: design decisions"| grill
+
+  subgraph plan ["Step 1: plan. Fable asks, I answer"]
+    grill["grill-with-docs<br/>numbered rounds of questions<br/>terms go to GLOSSARY.md, decisions to ADRs"]
+    grill --> spec["/to-spec<br/>one GitHub issue labelled spec"]
+    spec --> draft["/to-tickets<br/>each ticket has a Model line and a Verify block"]
+    draft --> setwave["Review wave reads the draft"]
+    setwave --> approve{"Do I approve<br/>the breakdown?"}
+    approve -->|"no"| draft
+    approve -->|"yes"| publish["Tickets published as sub-issues<br/>labelled ready-for-agent"]
+  end
+
+  publish --> frontier
+
+  subgraph build ["Step 2: build. afk run, nobody at the keyboard"]
+    frontier["Runner picks the frontier<br/>two tickets at a time"]
+    frontier --> route["Router picks the model and the account<br/>and records the route"]
+    route --> session["A session builds in its own worktree<br/>runs the cheap checks, commits"]
+    session --> served{"Did the model I asked for<br/>do the work?"}
+    served -->|"no: flagged or swapped"| peer["Work discarded<br/>a peer from another vendor tries once"]
+    peer --> session
+    served -->|"yes"| gate{"The runner's gate<br/>every Verify line<br/>heavy lines under machine caps"}
+    gate -->|"red"| fix["Fix pass by the same session<br/>two at most"]
+    fix --> gate
+    gate -->|"third red"| human["needs-human<br/>the other tickets keep going"]
+    gate -->|"green, sealed ticket"| lane["Lane wave<br/>Kimi and Luna review"]
+    lane --> land
+    gate -->|"green"| land["Fast-forward onto feat/spec-slug<br/>issue closed, draft PR opened"]
+    land -->|"tickets left"| frontier
+  end
+
+  land -->|"every ticket landed"| runend
+
+  subgraph ship ["Step 3: ship. My call at every step"]
+    runend["Run end<br/>PR body with manual test steps<br/>review wave posts one comment"]
+    runend --> go["I say go<br/>each finding checked by hand<br/>real ones fixed"]
+    go --> walk["Manual pass, step by step"]
+    walk --> green{"Do I say GREEN?"}
+    green -->|"no"| go
+    green -->|"yes"| staging["PR merged into the staging branch"]
+    staging --> tomain["Later, by my own command<br/>staging merged into main"]
+  end
 ```
+
+Diamonds are decisions. Three of them are mine alone: the breakdown, GREEN and the merge into `main`.
 
 1. **Triage.** Every request gets one of four lanes and a named model before work starts. Inline is small and unambiguous. Pipeline has real design decisions. Loop is "keep going until X", with the goal and the stop condition agreed first. Split is too big for one session, so the session stops and proposes the split.
 2. **Grill.** For pipeline work, Fable asks its questions in numbered rounds, each with the answer it would pick, and I type the real ones. I am editing answers, which is faster than writing them. New terms go into a glossary and decisions into ADRs.
 3. **Spec.** The agreed design becomes one GitHub issue.
 4. **Tickets.** The spec is split into tickets small enough for one fresh session. Each names its model and ends with a `Verify` block of shell commands that must all exit 0. A review wave reads the draft, and nothing is published or built until I approve the breakdown.
 5. **Build.** The runner starts the tickets whose blockers are closed, two at a time, each session in its own git worktree.
-6. **Gate and land.** The runner runs each ticket's whole `Verify` itself. Green fast-forwards the ticket onto the spec's integration branch. Red hands the same session the failing line for a fix pass, twice at most. A third red parks the ticket for me while the rest keep building.
+6. **Gate and land.** The runner first reads the session's transcript. If a safety filter stopped the model, or another model answered in its place, the work is thrown away and a model from another vendor tries once. Then the runner runs the ticket's whole `Verify` itself. Green fast-forwards the ticket onto the spec's integration branch. Red hands the same session the failing line for a fix pass, twice at most. A third red parks the ticket for me while the rest keep building.
 7. **Run end.** When every ticket has landed, the PR from the integration branch into the staging branch gets a body with manual test steps, and a review wave posts its findings as one comment. No fix pass follows on its own.
 8. **My review.** When I say go, each finding is checked by hand and the ones that hold up get fixed. A final walk-through ends in my explicit GREEN, and the PR merges into the staging branch. Merging staging into `main` is a separate action that I take myself, one command at a time.
 
@@ -62,6 +107,34 @@ heavy browser ram:4 -- sh -c 'npm run build && node tools/gate.js --touched'
 heavy cpu -- npm test
 ```
 
+## What runs around every session
+
+The flow above is half the harness. The other half fires on its own, in any session, in any project. Fifteen hook entries cover five events, and every one fails open, so a broken hook lets the session continue.
+
+```mermaid
+flowchart LR
+  subgraph s1 ["Session starts"]
+    a1["refresh pulls the harness<br/>and re-applies its mirrors"]
+    a2["brain hands over the project's card"]
+    a3["router records the session"]
+  end
+  subgraph s2 ["Each prompt"]
+    b1["router adds an advisory label"]
+    b2["brain adds pointers to docs"]
+  end
+  subgraph s3 ["Each tool call"]
+    c1["Before Bash: four guards<br/>merge to main, dev server,<br/>chained branch switch, heavy lines"]
+    c2["Around an Agent dispatch:<br/>router routes it, then records<br/>which model answered"]
+    c3["After a write: design tells,<br/>frontmatter, brain check"]
+  end
+  subgraph s4 ["Session ends"]
+    d1["reaper kills what the session left running"]
+  end
+  s1 --> s2 --> s3 --> s4
+```
+
+A mirror is a copy of the rules inside another tool. The harness keeps one in the Codex CLI, one in Kimi Code and one in T3 Code, and one script applies all of them.
+
 ## The parts
 
 **The runner.** `afk` is one Python file on the standard library that builds a spec's tickets with nobody at the keyboard. Every decision in it is a rule over tracker state and exit codes. Sessions build and never decide. Its memory is the comments it writes on each ticket, so a stopped run resumes from the tracker at no cost. It refuses to start while the integration branch is checked out anywhere else or while its own checkout is behind. It never answers a session that asks for approval. It stops after three hours of wall clock, whatever is left.
@@ -74,7 +147,11 @@ heavy cpu -- npm test
 
 **The guardrail hooks.** These are shell scripts that run around a tool call and say no, whatever the model remembers. One blocks merges, rebases and pushes onto `main`, `master` or `staging`. One refuses a ticket session the heavy lines that belong to the gate. One blocks a bare dev server. One flags stock AI design and prose signatures after a write. They fail open when their input does not parse, so a broken hook never bricks a session. They make no claim to be a security boundary. The merge guard's own documentation says it "stops a session's mistake, not a session set on landing work".
 
-**The selftests.** Each script has a suite that runs against stubs, with no model call and no network. The runner's suite had 384 tests on 2026-10-31 and is the harness's own gate, one line in its gate file. At the last audit the router's suite had 159 tests and the merge guard's had 142, most of them generated rows of one hook payload each. The copies of the rules that the harness keeps in other vendors' CLIs prove themselves with a `--check` mode that writes nothing. The suites get audited too, and the result is under "Measured".
+**The brain.** A project opts in with one file. From then on its decision records, its glossary and its notes are searchable, and they stay markdown in the project's repo. A hook gives every session a card of the current decisions by title, capped near 1,500 tokens. Another adds up to three pointers when a prompt uses a word the docs define. Search is keyword fused with vectors, because a test on my own docs found 21 of 30 paraphrased questions that way against 16 for keyword alone. An answer is a quoted excerpt with its path, its date and whether it is still current.
+
+**The sealed lane.** Security work that a Claude model would be stopped on goes to Kimi alone. Kimi builds the ticket, and a Kimi leg and a gpt-6-luna leg review it before it lands. It is built and tested and has barely been used, which is under "What it costs".
+
+**The selftests.** Each script has a suite that runs against stubs, with no model call and no network. The runner's suite has 472 tests and is the harness's own gate, one line in its gate file. The router's suite has 188. At the last audit the merge guard's had 142, most of them generated rows of one hook payload each. The copies of the rules that the harness keeps in other vendors' CLIs prove themselves with a `--check` mode that writes nothing. The suites get audited too, and the result is under "Measured".
 
 Models and agents map to jobs by a table in the rules file. These are defaults, and work that misses the bar on a cheaper model is redone on a better one.
 
@@ -89,6 +166,38 @@ Models and agents map to jobs by a table in the rules file. These are defaults, 
 | Checks that drive a real browser or app, image generation | gpt-6-astra |
 
 Four agent definitions carry those jobs inside a session. `worker` implements and returns the test output with the change. `reviewer` reads from a fresh context and never fixes. `scout` finds facts and never decides what to change. `reasoner` makes the judgement calls an Opus session hands off, and shows its reasoning.
+
+## Skills
+
+24 skills. A `/` before a name means only I can trigger it, by typing the command.
+
+| group | skills | for |
+|---|---|---|
+| Planning | `grilling`, `grill-me`, `grill-with-docs`, `domain-modeling`, `codebase-design`, `/to-spec`, `/to-tickets` | Questioning a design, naming things, and turning the result into a spec and tickets. |
+| Building | `/implement`, `tdd`, `diagnosing-bugs`, `user-journey-testing` | Building one ticket, test-first work, hard bugs, and clicking through the real app. |
+| Review | `codex-review`, `/pr`, `/retro` | Running a review wave, writing the PR body, and retros that turn lessons into config changes. |
+| Other vendors | `codex-implementation`, `codex-computer-use`, `codex-image` | Handing bulk edits, browser checks and images to GPT models. |
+| Design | `design-from-references`, `motion-design` | Matching a reference's layout before writing code, and animation timing. |
+| Writing | `writing-for-agents`, `unslop` | Writing instructions models follow, and cutting AI tells from prose. |
+| Sessions | `/handoff`, `pickup` | Passing work to a fresh session. |
+| Iterating | `hillclimb` | A council of models grades one artifact blind while a fresh designer revises it. |
+
+## A month of use
+
+These counts come from records the harness keeps about itself, read on 2026-11-12.
+
+| What | Count | Window |
+|---|---|---|
+| Runner runs | 139 | since 2026-10-07 |
+| Runs that ended with every ticket landed | 30 of the last 50 with a stop record | |
+| Runs stopped by a usage limit | 6 of the same 50 | |
+| Routing decisions stored | 2,533 | 19 days |
+| Ticket sessions routed | 171, of which 166 on Opus | 19 days |
+| Review waves routed | 82 | 19 days |
+| Calls to the review skill | 117 | 30 days |
+| Subagent dispatches | scout 448, reviewer 267, reasoner 127, worker 17 | 30 days |
+
+The numbers also show what is not used. The rule that keeps sealed work on Kimi has fired once, on an advisory. The rule that hands flagged work to another vendor has changed one route. The retro skill ran zero times in 30 days.
 
 ## Why it is built this way
 
@@ -195,6 +304,10 @@ An earlier audit had read every test in seven suites against the current code an
 - A gate in a worktree can pass vacuously when it reads untracked files.
 - The suites rot. The audit above found 52 stale or weak tests across seven suites.
 - Setup is manual where it touches credentials. Every login is made by hand on each machine, and nothing automates one.
+- Parts of it are built and barely used. The sealed lane has an ADR, its own review wave and runner code, and no sealed ticket has been routed yet. A run that finishes itself was built in seven tickets and never merged. Every session still pays to read the rules for both.
+- The router is blind where it matters most to me. Half of the one-line advisories on a prompt come back with no label, and most session records carry no model, so it often cannot say whether a session is on the right one.
+- One Kimi review leg in five fails, hits a limit or times out, and nothing reads Kimi's usage window ahead of a run.
+- The loop that should turn mistakes into rule changes is not running. Zero retros in the last 30 days.
 - It fits one person. Anyone else would have to rewrite the model table, the routing table and most of the rules.
 
 ## Credits
